@@ -31,6 +31,35 @@ endif()
 message(STATUS "AXSLCC_OUT_DIR=${AXSLCC_OUT_DIR}")
 message(STATUS "AXSLCC_FIND_PROG_ROOT=${AXSLCC_FIND_PROG_ROOT}")
 
+# The compiler version is an input of every shader output. Without it a compiler upgrade
+# regenerates nothing — the archives keep the format the previous axslcc wrote — and the build
+# reports success while the engine reads archives it cannot parse. Observed on a downstream host
+# on 2026-11-17: after axslcc moved to 4.0.1, 53 of 64 archives were still pre-4.0 `AXSC` files,
+# and the first draw crashed in the vertex layout with an empty shader. The stamp's mtime only
+# changes when the version string does, so this costs nothing on an ordinary build.
+set(AXSLCC_VERSION_STAMP "${CMAKE_BINARY_DIR}/runtime/axslcc.version")
+execute_process(
+  COMMAND "${AXSLCC_EXE}" --version
+  OUTPUT_VARIABLE _axslcc_version_output
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+if(NOT _axslcc_version_output)
+  # A compiler that cannot report a version is still identified by its path.
+  set(_axslcc_version_output "${AXSLCC_EXE}")
+else()
+  # `axslcc --version` prints a banner under the version line; key on the version alone so
+  # re-wording the banner does not force a full shader rebuild.
+  string(REGEX REPLACE "\n.*" "" _axslcc_version_output "${_axslcc_version_output}")
+  string(STRIP "${_axslcc_version_output}" _axslcc_version_output)
+endif()
+if(EXISTS "${AXSLCC_VERSION_STAMP}")
+  file(READ "${AXSLCC_VERSION_STAMP}" _axslcc_version_previous)
+endif()
+if(NOT _axslcc_version_previous STREQUAL _axslcc_version_output)
+  file(WRITE "${AXSLCC_VERSION_STAMP}" "${_axslcc_version_output}")
+endif()
+
 # PROPERTY: include direcotries (optional)
 define_property(SOURCE PROPERTY AXSLCC_INCLUDE_DIRS
   BRIEF_DOCS "Compiled shader include directories"
@@ -217,6 +246,7 @@ function(ax_add_shader_target target_name)
         MAIN_DEPENDENCY ${SC_FILE}
         OUTPUT ${SC_OUTPUT}
         COMMAND ${AXSLCC_EXE} ${SC_FLAGS} "-o" "${SC_OUTPUT}" "${SC_FILE}"
+        DEPENDS ${AXSLCC_VERSION_STAMP}
         COMMENT "${SC_COMMENT}"
         VERBATIM
       )
@@ -236,6 +266,7 @@ function(ax_add_shader_target target_name)
         MAIN_DEPENDENCY ${SC_FILE}
         OUTPUT ${SC_OUTPUTS}
         ${SC_CMD_LINES}
+        DEPENDS ${AXSLCC_VERSION_STAMP}
         COMMENT "${SC_COMMENT}"
         VERBATIM
       )
