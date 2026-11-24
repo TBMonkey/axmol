@@ -1330,6 +1330,37 @@ public:
         // Unlit has color/depth; lit and distortion have color/normal-or-background/depth.
         const int depthSlot = _samplerLocations[1] ? 2 : 1;
         _samplerLocations[depthSlot] = _program->getSamplerLocation("sampler_depthTex");
+
+        // The advanced pixel shaders name their textures _colorTex/_alphaTex/... instead of u_tex0..7.
+        // Resolve them in register order: the collector packs the order the shaders declare.
+        bool hasAdvancedTextures = false;
+        for (const auto& entry : _program->getActiveTextureInfos())
+        {
+            if (entry.first == "_colorTex")
+            {
+                hasAdvancedTextures = true;
+                break;
+            }
+        }
+
+        if (hasAdvancedTextures)
+        {
+            std::vector<std::pair<int, std::string_view>> declared;
+            declared.reserve(_program->getActiveTextureInfos().size());
+            for (const auto& entry : _program->getActiveTextureInfos())
+            {
+                if (entry.second && entry.second->location >= 0)
+                    declared.emplace_back(entry.second->location, entry.first);
+            }
+            std::sort(declared.begin(), declared.end());
+
+            for (size_t i = 0; i < declared.size() && i < 8; ++i)
+            {
+                _advancedTextureLocations[i] = _programState->getUniformLocation(declared[i].second);
+                _advancedTextureRegister[i]  = declared[i].first;
+                _samplerLocations[i]         = _program->getTextureSamplerLocation(declared[i].first);
+            }
+        }
     }
 
     ~Shader() override
@@ -1407,10 +1438,40 @@ public:
             return it->second;
 
         const auto uvOffset = getUVOffset(stride);
-        const bool isLighting = (stride == sizeof(EffekseerRenderer::LightingVertex) ||
-                                 stride == sizeof(EffekseerRenderer::AdvancedLightingVertex));
         ax::rhi::VertexLayoutDesc desc;
-        if (isLighting)
+        if (stride == static_cast<int32_t>(sizeof(EffekseerRenderer::AdvancedSimpleVertex)))
+        {
+            // AdvancedSimpleVertex is 72 bytes: Pos(12) Col(4) UV(8) AlphaUV(8) UVDistortionUV(8)
+            // BlendUV(8) BlendAlphaUV(8) BlendUVDistortionUV(8) FlipbookIndex(4) AlphaThreshold(4).
+            desc.startLayout(8);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::POSITION), ax::rhi::VertexElementType::FLOAT3, 0, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::NORMAL), ax::rhi::VertexElementType::UBYTE4, 12, true);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD0), ax::rhi::VertexElementType::FLOAT2, 16, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD1), ax::rhi::VertexElementType::FLOAT4, 24, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD2), ax::rhi::VertexElementType::FLOAT2, 40, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD3), ax::rhi::VertexElementType::FLOAT4, 48, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD4), ax::rhi::VertexElementType::FLOAT, 64, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD5), ax::rhi::VertexElementType::FLOAT, 68, false);
+        }
+        else if (stride == static_cast<int32_t>(sizeof(EffekseerRenderer::AdvancedLightingVertex)))
+        {
+            // AdvancedLightingVertex is 88 bytes: Pos(12) Col(4) Normal(4) Tangent(4) UV1(8) UV2(8)
+            // AlphaUV(8) UVDistortionUV(8) BlendUV(8) BlendAlphaUV(8) BlendUVDistortionUV(8)
+            // FlipbookIndex(4) AlphaThreshold(4).
+            desc.startLayout(11);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::POSITION), ax::rhi::VertexElementType::FLOAT3, 0, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::NORMAL), ax::rhi::VertexElementType::UBYTE4, 12, true);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic{"NORMAL", 1}), ax::rhi::VertexElementType::UBYTE4, 16, true);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic{"NORMAL", 2}), ax::rhi::VertexElementType::UBYTE4, 20, true);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD0), ax::rhi::VertexElementType::FLOAT2, 24, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD1), ax::rhi::VertexElementType::FLOAT2, 32, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD2), ax::rhi::VertexElementType::FLOAT4, 40, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD3), ax::rhi::VertexElementType::FLOAT2, 56, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD4), ax::rhi::VertexElementType::FLOAT4, 64, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD5), ax::rhi::VertexElementType::FLOAT, 80, false);
+            desc.addAttrib(_program->getVertexInputDesc(ax::rhi::VertexSemantic::TEXCOORD6), ax::rhi::VertexElementType::FLOAT, 84, false);
+        }
+        else if (stride == sizeof(EffekseerRenderer::LightingVertex))
         {
             // LightingVertex: Pos(12) + Col(4) + Normal(4) + Tangent(4) + UV(8) + UV2(8) = 40
             desc.startLayout(6);
@@ -1437,8 +1498,13 @@ public:
 
     void setTexture(int slot, ax::rhi::Texture* texture) override
     {
-        if (texture && slot >= 0 && slot < 8 && _textureLocations[slot])
+        if (!texture || slot < 0 || slot >= 8)
+            return;
+
+        if (_textureLocations[slot])
             _programState->setTexture(_textureLocations[slot], _textureLocations[slot].location, texture);
+        else if (_advancedTextureLocations[slot])
+            _programState->setTexture(_advancedTextureLocations[slot], _advancedTextureRegister[slot], texture);
     }
 
     void setSampler(int slot, const ax::rhi::SamplerDesc& samplerDesc) override
@@ -1454,7 +1520,7 @@ public:
 
         for (int slot = 0; slot < 8; slot++)
         {
-            if (_textureLocations[slot])
+            if (_textureLocations[slot] || _advancedTextureLocations[slot])
                 setTexture(slot, texture);
         }
     }
@@ -1501,6 +1567,8 @@ private:
 
     ax::rhi::UniformLocation _textureLocations[8];
     ax::rhi::SamplerLocation _samplerLocations[8];
+    ax::rhi::UniformLocation _advancedTextureLocations[8]{};
+    int _advancedTextureRegister[8]{};
 };
 
 namespace
@@ -1786,7 +1854,9 @@ bool Renderer::initialize()
 bool Renderer::initializeStandardShaders()
 {
     auto* registry = ax::rhi::SamplerRegistry::getInstance();
-    for (const char* name : {"sampler_colorTex", "sampler_normalTex", "sampler_backTex", "sampler_depthTex"})
+    for (const char* name : {"sampler_colorTex", "sampler_normalTex", "sampler_backTex", "sampler_depthTex",
+                            "sampler_alphaTex", "sampler_uvDistortionTex", "sampler_blendTex", "sampler_blendAlphaTex",
+                            "sampler_blendUVDistortionTex"})
         if (!registry->registerSampler(name, ax::rhi::SamplerDesc{}))
             return false;
 
@@ -1811,15 +1881,22 @@ bool Renderer::initializeStandardShaders()
     auto* unlit = load("custom/sprite_unlit_vs", "custom/model_ps");
     auto* lit = load("custom/sprite_unlit_vs_1", "custom/model_ps_1");
     auto* distortion = load("custom/sprite_unlit_vs_2", "custom/model_distortion_ps_1");
-    if (!unlit || !lit || !distortion)
+
+    // The core selects ShaderAd* when an effect requires the advanced renderer (Renderer_Impl::GetShader),
+    // so they pair the advanced sprite vertex stage with the advanced pixel stage that reads its
+    // UV_Others varyings. _1 is lit, _2 is distortion; base/_1 of ad_model_ps keep soft particles here.
+    auto* adUnlit = load("custom/ad_sprite_unlit_vs", "custom/ad_model_ps");
+    auto* adLit = load("custom/ad_sprite_unlit_vs_1", "custom/ad_model_ps_1");
+    auto* adDistortion = load("custom/ad_sprite_unlit_vs_2", "custom/ad_model_distortion_ps");
+    if (!unlit || !lit || !distortion || !adUnlit || !adLit || !adDistortion)
         return false;
 
     GetImpl()->ShaderUnlit = std::make_unique<Shader>(unlit, false);
     GetImpl()->ShaderLit = std::make_unique<Shader>(lit, false);
     GetImpl()->ShaderDistortion = std::make_unique<Shader>(distortion, true);
-    GetImpl()->ShaderAdUnlit = std::make_unique<Shader>(unlit, false);
-    GetImpl()->ShaderAdLit = std::make_unique<Shader>(lit, false);
-    GetImpl()->ShaderAdDistortion = std::make_unique<Shader>(distortion, true);
+    GetImpl()->ShaderAdUnlit = std::make_unique<Shader>(adUnlit, false);
+    GetImpl()->ShaderAdLit = std::make_unique<Shader>(adLit, false);
+    GetImpl()->ShaderAdDistortion = std::make_unique<Shader>(adDistortion, true);
     for (auto* shader : {GetImpl()->ShaderUnlit.get(), GetImpl()->ShaderLit.get(), GetImpl()->ShaderDistortion.get(),
                          GetImpl()->ShaderAdUnlit.get(), GetImpl()->ShaderAdLit.get(), GetImpl()->ShaderAdDistortion.get()})
     {
