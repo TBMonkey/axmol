@@ -13,6 +13,11 @@
 #include "axmol/base/Macros.h"
 #include "axmol/tlx/utility.hpp"
 #include "axmol/rhi/opengl/OpenGLState.h"
+#include "axmol/platform/FileUtils.h"
+#include "axmol/tlx/hash.hpp"
+
+#include <cstdlib>
+#include <fstream>
 
 namespace ax::rhi::gl
 {
@@ -30,6 +35,48 @@ ShaderModuleImpl::~ShaderModuleImpl()
 void ShaderModuleImpl::recompileShader()
 {
     compileShader();
+}
+
+// The driver's info log quotes a line and a type and never names the artifact, and the log line above carries the
+// whole source at a size nobody diffs by eye. On failure, also write those exact bytes to a file whose name says
+// the stage, the size and a hash — so `diff` against an archive chunk answers "did the driver see these bytes?"
+static const char* glFailedStageName(GLenum shaderType)
+{
+    switch (shaderType)
+    {
+    case GL_VERTEX_SHADER:
+        return "vertex";
+    case GL_FRAGMENT_SHADER:
+        return "fragment";
+    case GL_COMPUTE_SHADER:
+        return "compute";
+    default:
+        return "unknown";
+    }
+}
+
+static void dumpFailedShaderSource(GLenum shaderType, const uint8_t* code, size_t size)
+{
+    const auto hash = tlx::hash32_bytes(code, size);
+
+    // ShaderModule has no name, and the backend is handed bytes rather than paths; the byte count identifies
+    // one compute kernel from another (1,063 vs 14,254) without plumbing a name through every backend.
+    auto dir = FileUtils::getInstance()->getWritablePath();
+    if (const char* overrideDir = ::getenv("AX_GL_FAILED_DIR"); overrideDir && *overrideDir)
+        dir = overrideDir;
+    if (dir.empty())
+        dir = ".";
+    else if (dir.back() != '/' && dir.back() != '\\')
+        dir += '/';
+
+    const auto path = dir + fmt::format("gl_compile_failed_{}_{}_{:08x}.glsl", glFailedStageName(shaderType), size, hash);
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (out)
+        out.write(reinterpret_cast<const char*>(code), static_cast<std::streamsize>(size));
+
+    AXLOGE("axmol:  stage={}, bytes={}, source_hash32={:08x}, source={}", glFailedStageName(shaderType), size, hash,
+           out ? path : std::string("<not written>"));
 }
 
 void ShaderModuleImpl::compileShader()
@@ -61,6 +108,7 @@ void ShaderModuleImpl::compileShader()
             glGetShaderInfoLog(_shader, logLength, nullptr, (GLchar*)errorLog.get());
             AXLOGE("axmol:ERROR: Failed to compile shader, detail: {}\n{}", errorLog.get(),
                    std::string_view{reinterpret_cast<char*>(_codeSpan.data()), _codeSpan.size()});
+            dumpFailedShaderSource(shaderType, _codeSpan.data(), _codeSpan.size());
         }
         else
         {
